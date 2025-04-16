@@ -19,7 +19,6 @@ class BookStore:
     
     def add_book(self, book: bookstore_pb2.Book) -> None:
         self.books[book.id] = book
-        # Notify subscribers
         for subscriber in self.subscribers:
             try:
                 subscriber.put(book)
@@ -61,21 +60,17 @@ class BookStore:
             print(f"User {username} disconnected. Active users: {self.get_active_usernames()}")
     
     def broadcast_chat_message(self, message, target_username=None):
-        # Store message history, except for system messages
         if message.user != "SYSTEM":
             self.chat_messages.append(message)
         
-        # If target is specified, send only to that user
         if target_username and target_username in self.active_chat_clients:
             try:
                 self.active_chat_clients[target_username].put(message)
-                # Also send to sender if it's not the same as target
                 if message.user != target_username and message.user in self.active_chat_clients:
                     self.active_chat_clients[message.user].put(message)
             except Exception as e:
                 print(f"Error sending to {target_username}: {str(e)}")
         else:
-            # Send to all active clients (group chat)
             for username, client_queue in list(self.active_chat_clients.items()):
                 try:
                     client_queue.put(message)
@@ -182,97 +177,72 @@ class BookStoreServicer(bookstore_pb2_grpc.BookStoreServicer):
         )
     
     def Chat(self, request_iterator, context):
-        # Extract first message to identify the client
+        import queue
+        client_queue = queue.Queue()
+
         try:
             first_message = next(request_iterator)
-            client_queue = queue.Queue()
             username = first_message.user
-            
-            # Handle special "GET_USERS" message
+
             if first_message.message == "GET_USERS":
                 active_users = self.store.get_active_usernames()
-                # Return list of active users
                 for user in active_users:
-                    if user != username:  # Don't include requesting user
+                    if user != username:
                         yield bookstore_pb2.ChatMessage(
                             user=user,
                             message="ONLINE",
                             timestamp=int(time.time())
                         )
                 return
-            
-            # Register this client for broadcasts
+
             self.store.add_chat_client(username, client_queue)
-            
-            # Process the message parameters for first message
-            target = None
+
+            join_msg = bookstore_pb2.ChatMessage(
+                user="SYSTEM",
+                message=f"{username} has joined the chat",
+                timestamp=int(time.time())
+            )
+            self.store.broadcast_chat_message(join_msg)
+
             if first_message.message != "LISTENING":
-                if ":" in first_message.message:
-                    parts = first_message.message.split(":", 1)
-                    if len(parts) > 1 and parts[0].strip() in self.store.get_active_usernames():
-                        target = parts[0].strip()
-                        first_message.message = parts[1].strip()
-                        
-                # Broadcast a welcome message only for new chat clients, not listeners
-                system_message = bookstore_pb2.ChatMessage(
-                    user="SYSTEM",
-                    message=f"{username} has joined the chat",
-                    timestamp=int(time.time())
-                )
-                # Don't send join message to the user who is joining
-                for user, q in self.store.active_chat_clients.items():
-                    if user != username:
-                        try:
-                            q.put(system_message)
-                        except:
-                            pass
-                            
-                # If this is a real message (not just LISTENING), broadcast it
-                if first_message.message != "LISTENING":
-                    self.store.broadcast_chat_message(first_message, target)
-            
-            # Process the rest of the messages
-            for request in request_iterator:
-                # Check for private message format (username: message)
-                target = None
-                if ":" in request.message:
-                    parts = request.message.split(":", 1)
-                    if len(parts) > 1 and parts[0].strip() in self.store.get_active_usernames():
-                        target = parts[0].strip()
-                        request.message = parts[1].strip()
-                
-                # Broadcast the message to target or everyone
-                self.store.broadcast_chat_message(request, target)
-            
-            # When client is disconnecting, notify others
-            if username in self.store.active_chat_clients:
-                system_message = bookstore_pb2.ChatMessage(
-                    user="SYSTEM",
-                    message=f"{username} has left the chat",
-                    timestamp=int(time.time())
-                )
-                # Only send to other users, not to the one leaving
-                for user, q in list(self.store.active_chat_clients.items()):
-                    if user != username:
-                        try:
-                            q.put(system_message)
-                        except:
-                            pass
-                            
-            # Wait for messages to send back to this client
+                self.store.broadcast_chat_message(first_message)
+
+            def receive_messages():
+                try:
+                    for request in request_iterator:
+                        target = None
+                        if ":" in request.message:
+                            parts = request.message.split(":", 1)
+                            if len(parts) > 1 and parts[0].strip() in self.store.get_active_usernames():
+                                target = parts[0].strip()
+                                request.message = parts[1].strip()
+                        self.store.broadcast_chat_message(request, target)
+                except Exception as e:
+                    print(f"Receive thread error: {str(e)}")
+                finally:
+                    self.store.remove_chat_client(username)
+                    leave_msg = bookstore_pb2.ChatMessage(
+                        user="SYSTEM",
+                        message=f"{username} has left the chat",
+                        timestamp=int(time.time())
+                    )
+                    self.store.broadcast_chat_message(leave_msg)
+
+            recv_thread = threading.Thread(target=receive_messages)
+            recv_thread.daemon = True
+            recv_thread.start()
+
             while context.is_active():
                 try:
-                    # Get the next message to send to this client
-                    message = client_queue.get(timeout=1)
-                    yield message
+                    msg = client_queue.get(timeout=1)
+                    yield msg
                 except queue.Empty:
                     continue
+
         except Exception as e:
             print(f"Chat error: {str(e)}")
-        finally:
-            # Clean up when client disconnects
-            if 'username' in locals():
-                self.store.remove_chat_client(username)
+            self.store.remove_chat_client(username)
+
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))

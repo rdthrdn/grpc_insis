@@ -98,11 +98,9 @@ class BookStoreClient:
         return response.success, response.message
     
     def chat(self):
-        # Get active users
         print("\n=== Chat Room ===")
         print("Connecting to chat server...")
-        
-        # Get active users if possible
+
         active_users = []
         try:
             active_users = self.get_active_users()
@@ -112,52 +110,46 @@ class BookStoreClient:
                 print("\nNo other users online at the moment.")
         except Exception as e:
             print(f"Error getting active users: {str(e)}")
-        
+
         print("\nChat instructions:")
         print("- Type a message to send to everyone (group chat)")
         print("- Type 'username: message' to send a private message")
         print("- Type 'exit' to leave the chat\n")
-        
-        # Create thread-safe flags and queues
+
         exit_flag = threading.Event()
-        
-        def listen_for_messages():
+        send_queue = queue.Queue()
+
+        def request_stream():
+            # Send initial "LISTENING" message
+            yield bookstore_pb2.ChatMessage(
+                user=self.username,
+                message="LISTENING",
+                timestamp=int(time.time())
+            )
+            # Keep yielding messages from send_queue
+            while not exit_flag.is_set():
+                try:
+                    msg = send_queue.get(timeout=0.1)
+                    yield msg
+                except queue.Empty:
+                    continue
+
+        def listen_for_messages(response_iterator):
             try:
-                # Setup listener connection
-                listen_stub = bookstore_pb2_grpc.BookStoreStub(grpc.insecure_channel('localhost:50051'))
-                
-                # Create a simple request to initiate the stream
-                request = bookstore_pb2.ChatMessage(
-                    user=self.username,
-                    message="LISTENING",
-                    timestamp=int(time.time())
-                )
-                
-                # Listen for messages
-                for response in listen_stub.Chat(iter([request])):
-                    if exit_flag.is_set():
-                        break
-                    
-                    # Skip messages from ourselves
+                for response in response_iterator:
                     if response.user == self.username:
                         continue
-                    
-                    # Format the message nicely based on who sent it
                     if response.user == "SYSTEM":
                         print(f"\n[SYSTEM]: {response.message}")
-                    # Detect if this is a private message
                     elif response.message.startswith("[PRIVATE] "):
                         print(f"\n[Private from {response.user}]: {response.message[10:]}")
                     else:
                         print(f"\n[{response.user}]: {response.message}")
-                    
-                    # Re-print the input prompt
                     print("You: ", end="", flush=True)
-                    
             except Exception as e:
-                if not exit_flag.is_set():
-                    print(f"\nListen error: {str(e)}")
-        
+                print(f"\nListen error: {str(e)}")
+                exit_flag.set()
+
         def send_messages():
             try:
                 while not exit_flag.is_set():
@@ -165,11 +157,9 @@ class BookStoreClient:
                     if message.lower() == 'exit':
                         exit_flag.set()
                         break
-                    
                     if not message.strip():
-                        continue  # Skip empty messages
-                    
-                    # Check if this is a private message
+                        continue
+
                     target = None
                     display_message = message
                     if ":" in message:
@@ -177,51 +167,38 @@ class BookStoreClient:
                         if len(parts) > 1 and parts[0].strip() in active_users:
                             target = parts[0].strip()
                             display_message = parts[1].strip()
-                            # Tag message for server to know it's private
                             message = f"{target}: [PRIVATE] {display_message}"
-                    
-                    # Send the message
-                    request = bookstore_pb2.ChatMessage(
+
+                    chat_msg = bookstore_pb2.ChatMessage(
                         user=self.username,
                         message=message,
                         timestamp=int(time.time())
                     )
-                    
-                    response = self.stub.Chat(iter([request]))
-                    # Consume response iterator to avoid blocking
-                    try:
-                        for _ in response:
-                            pass
-                    except:
-                        # Ignore errors when consuming response
-                        pass
+                    send_queue.put(chat_msg)
             except Exception as e:
                 print(f"\nSend error: {str(e)}")
                 exit_flag.set()
-        
-        # Start listening for messages in a separate thread
-        listen_thread = threading.Thread(target=listen_for_messages)
+
+        response_iterator = self.stub.Chat(request_stream())
+
+        listen_thread = threading.Thread(target=listen_for_messages, args=(response_iterator,))
         listen_thread.daemon = True
         listen_thread.start()
-        
-        # Start sending messages in another thread
+
         send_thread = threading.Thread(target=send_messages)
         send_thread.daemon = True
         send_thread.start()
-        
-        # Wait for the send thread to complete (when user types 'exit')
+
         try:
-            while send_thread.is_alive() and not exit_flag.is_set():
-                send_thread.join(0.1)  # Allow keyboard interrupts every 0.1 sec
+            while send_thread.is_alive():
+                send_thread.join(0.1)
         except KeyboardInterrupt:
             exit_flag.set()
             print("\nExiting chat...")
 
-    def get_active_users(self):
-        """Get list of active users from server"""
-        # This is a simple implementation - in real world we'd have a proper RPC for this
-        # For now, we'll use a special chat message to get the active users
-        
+
+
+    def get_active_users(self):        
         try:
             request = bookstore_pb2.ChatMessage(
                 user=self.username,
