@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package bookstore;
+
+service BookStore {
+  rpc AddBook (AddBookRequest) returns (AddBookResponse) {}
+  rpc SearchBook (SearchBookRequest) returns (SearchBookResponse) {}
+  rpc UpdateStock (UpdateStockRequest) returns (UpdateStockResponse) {}
+  rpc ListBooks (ListBooksRequest) returns (ListBooksResponse) {}
+  rpc DeleteBook (DeleteBookRequest) returns (DeleteBookResponse) {}
+  rpc SubscribeToNewBooks (SubscribeRequest) returns (stream Book) {}
+  rpc BulkAddBooks (stream AddBookRequest) returns (BulkAddResponse) {}
+  rpc Chat (stream ChatMessage) returns (stream ChatMessage) {}
+}
+
+message Book {
+  string id = 1;
+  string title = 2;
+  string author = 3;
+  string isbn = 4;
+  int32 stock = 5;
+  float price = 6;
+}
+
+message AddBookRequest {
+  string title = 1;
+  string author = 2;
+  string isbn = 3;
+  int32 stock = 4;
+  float price = 5;
+}
+
+message AddBookResponse {
+  Book book = 1;
+  bool success = 2;
+  string message = 3;
+}
+
+message SearchBookRequest {
+  string query = 1;
+}
+
+message SearchBookResponse {
+  repeated Book books = 1;
+}
+
+message UpdateStockRequest {
+  string book_id = 1;
+  int32 new_stock = 2;
+}
+
+message UpdateStockResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListBooksRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+message ListBooksResponse {
+  repeated Book books = 1;
+  int32 total_books = 2;
+  int32 total_pages = 3;
+}
+
+message DeleteBookRequest {
+  string book_id = 1;
+}
+
+message DeleteBookResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SubscribeRequest {
+  int32 duration_seconds = 1;
+}
+
+message BulkAddResponse {
+  int32 total_books_added = 1;
+  bool success = 2;
+  string message = 3;
+}
+
+message ChatMessage {
+  string user = 1;
+  string message = 2;
+  int64 timestamp = 3;
+} 
